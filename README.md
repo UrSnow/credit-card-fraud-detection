@@ -21,6 +21,8 @@ Dataset URL: https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud
 
 The dataset is anonymised. Features `V1` to `V28` are PCA-transformed for confidentiality, while `Time`, `Amount`, and `Class` remain available. No ethics clearance is required for this project because the dataset is public and anonymised.
 
+The raw dataset is not committed to this repository. See `info.md` for download and local setup instructions. The code expects the file at `data/creditcard.csv` by default.
+
 ## What We Created vs External Sources
 
 The dataset comes from the public Kaggle/ULB credit card fraud dataset. The modelling workflow, preprocessing decisions, validation/test split, threshold tuning, model comparison, autoencoder experiments, evaluation analysis, and project code were created for this ACML project.
