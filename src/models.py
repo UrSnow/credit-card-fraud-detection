@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
+from sklearn.utils.class_weight import compute_class_weight
 
 try:
     from .evaluation import (
@@ -36,6 +37,46 @@ DEFAULT_AUTOENCODER_CONFIGS = (
         "name": "AE_bottleneck_12_dropout_0.3",
         "bottleneck_size": 12,
         "dropout_rate": 0.3,
+    },
+)
+DEFAULT_AUTOENCODER_LR_SWEEP_CONFIGS = (
+    {
+        "name": "AE_bottleneck_6_dropout_0.2_lr_1e-4",
+        "bottleneck_size": 6,
+        "dropout_rate": 0.2,
+        "learning_rate": 1e-4,
+    },
+    {
+        "name": "AE_bottleneck_6_dropout_0.2_lr_5e-4",
+        "bottleneck_size": 6,
+        "dropout_rate": 0.2,
+        "learning_rate": 5e-4,
+    },
+    {
+        "name": "AE_bottleneck_6_dropout_0.2_lr_1e-3",
+        "bottleneck_size": 6,
+        "dropout_rate": 0.2,
+        "learning_rate": 1e-3,
+    },
+)
+DEFAULT_MLP_CONFIGS = (
+    {
+        "name": "MLP_dense_64_32_dropout_0.2_lr_1e-3",
+        "hidden_units": (64, 32),
+        "dropout_rate": 0.2,
+        "learning_rate": 1e-3,
+    },
+    {
+        "name": "MLP_dense_128_64_32_dropout_0.3_lr_1e-3",
+        "hidden_units": (128, 64, 32),
+        "dropout_rate": 0.3,
+        "learning_rate": 1e-3,
+    },
+    {
+        "name": "MLP_dense_128_64_32_dropout_0.3_lr_5e-4",
+        "hidden_units": (128, 64, 32),
+        "dropout_rate": 0.3,
+        "learning_rate": 5e-4,
     },
 )
 
@@ -168,6 +209,106 @@ def build_autoencoder(input_dim, bottleneck_size=6, dropout_rate=0.2, learning_r
     return model
 
 
+def build_mlp_classifier(input_dim, hidden_units, dropout_rate, learning_rate):
+    """Build the dense supervised MLP classifier from notebook 05."""
+    import tensorflow as tf
+    from tensorflow.keras import Sequential
+    from tensorflow.keras.layers import Dense, Dropout, Input
+
+    model = Sequential(name="fraud_mlp")
+    model.add(Input(shape=(input_dim,)))
+    for units in hidden_units:
+        model.add(Dense(units, activation="relu"))
+        model.add(Dropout(dropout_rate))
+    model.add(Dense(1, activation="sigmoid"))
+
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
+        loss="binary_crossentropy",
+        metrics=[
+            tf.keras.metrics.AUC(curve="ROC", name="roc_auc"),
+            tf.keras.metrics.AUC(curve="PR", name="pr_auc"),
+        ],
+    )
+    return model
+
+
+def compute_balanced_class_weights(y):
+    """Return class weights for the rare-fraud supervised neural classifier."""
+    classes = np.array([0, 1])
+    weights = compute_class_weight(
+        class_weight="balanced",
+        classes=classes,
+        y=y,
+    )
+    return {int(label): float(weight) for label, weight in zip(classes, weights)}
+
+
+def mlp_positive_scores(model, X):
+    """Return one positive-class score per transaction for a Keras MLP."""
+    return model.predict(X, verbose=0).reshape(-1)
+
+
+def train_mlp_experiments(
+    X_train,
+    y_train,
+    X_val,
+    y_val,
+    configs=DEFAULT_MLP_CONFIGS,
+    thresholds=DEFAULT_THRESHOLD_GRID,
+    epochs=40,
+    batch_size=1024,
+    patience=5,
+    random_state=DEFAULT_RANDOM_STATE,
+):
+    """Train MLP configs and tune supervised thresholds on validation data."""
+    import tensorflow as tf
+    from tensorflow.keras.callbacks import EarlyStopping
+
+    class_weight = compute_balanced_class_weights(y_train)
+    trained_models = {}
+    histories = {}
+    threshold_frames = []
+
+    for config in configs:
+        tf.keras.backend.clear_session()
+        tf.keras.utils.set_random_seed(random_state)
+
+        model = build_mlp_classifier(
+            input_dim=X_train.shape[1],
+            hidden_units=config["hidden_units"],
+            dropout_rate=config["dropout_rate"],
+            learning_rate=config["learning_rate"],
+        )
+        early_stop = EarlyStopping(
+            monitor="val_pr_auc",
+            mode="max",
+            patience=patience,
+            restore_best_weights=True,
+        )
+        history = model.fit(
+            X_train,
+            y_train,
+            validation_data=(X_val, y_val),
+            epochs=epochs,
+            batch_size=batch_size,
+            class_weight=class_weight,
+            callbacks=[early_stop],
+            verbose=1,
+        )
+
+        model_name = config["name"]
+        val_scores = mlp_positive_scores(model, X_val)
+        trained_models[model_name] = model
+        histories[model_name] = history
+        threshold_frames.append(
+            tune_binary_thresholds(model_name, y_val, val_scores, thresholds)
+        )
+
+    validation_df = pd.concat(threshold_frames, ignore_index=True)
+    return trained_models, histories, validation_df, class_weight
+
+
 def reconstruction_error(model, X):
     """Compute row-wise mean squared reconstruction error."""
     reconstructions = model.predict(X, verbose=0)
@@ -209,6 +350,7 @@ def train_autoencoder_experiments(
             input_dim=input_dim,
             bottleneck_size=config["bottleneck_size"],
             dropout_rate=config["dropout_rate"],
+            learning_rate=config.get("learning_rate", 1e-3),
         )
 
         history = model.fit(
@@ -231,15 +373,17 @@ def train_autoencoder_experiments(
 
         for percentile in threshold_percentiles:
             threshold = np.percentile(train_loss, percentile)
-            validation_rows.append(
-                evaluate_anomaly_scores(
-                    model_name,
-                    y_val,
-                    val_loss,
-                    threshold,
-                    percentile=percentile,
-                )
+            row = evaluate_anomaly_scores(
+                model_name,
+                y_val,
+                val_loss,
+                threshold,
+                percentile=percentile,
             )
+            row["Bottleneck_Size"] = config["bottleneck_size"]
+            row["Dropout_Rate"] = config["dropout_rate"]
+            row["Learning_Rate"] = config.get("learning_rate", 1e-3)
+            validation_rows.append(row)
 
     validation_df = pd.DataFrame(validation_rows)
     return trained_autoencoders, histories, validation_df
@@ -262,6 +406,77 @@ def save_autoencoder_training_curve(history, model_name, figures_dir):
 
     fig.tight_layout()
     output_path = figures_dir / f"{_safe_filename(model_name)}_training_curve.png"
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
+def best_validation_result_per_model(validation_df):
+    """Return the validation-selected row for each model candidate."""
+    ordered = validation_df.sort_values(
+        ["F1", "PR_AUC", "Recall"],
+        ascending=False,
+    )
+    return ordered.groupby("Model", sort=False, as_index=False).head(1)
+
+
+def save_autoencoder_learning_rate_comparison(validation_df, figures_dir):
+    """Compare validation metrics for a fixed-architecture autoencoder LR sweep."""
+    import matplotlib.pyplot as plt
+
+    figures_dir = Path(figures_dir)
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    best_rows = best_validation_result_per_model(validation_df).sort_values(
+        "Learning_Rate"
+    )
+    rate_labels = [f"{rate:.0e}" for rate in best_rows["Learning_Rate"]]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    x = np.arange(len(best_rows))
+    width = 0.36
+
+    ax.bar(x - width / 2, best_rows["F1"], width, label="Validation F1")
+    ax.bar(x + width / 2, best_rows["PR_AUC"], width, label="Validation PR-AUC")
+    ax.set_title("Autoencoder Learning-Rate Sweep")
+    ax.set_xlabel("Adam learning rate")
+    ax.set_ylabel("Validation score")
+    ax.set_xticks(x, rate_labels)
+    ax.set_ylim(0, 1)
+    ax.legend()
+
+    fig.tight_layout()
+    output_path = figures_dir / "autoencoder_learning_rate_sweep_validation.png"
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return output_path, best_rows
+
+
+def save_mlp_training_curve(history, figures_dir):
+    """Save loss and PR-AUC curves for the selected MLP."""
+    import matplotlib.pyplot as plt
+
+    figures_dir = Path(figures_dir)
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    axes[0].plot(history.history["loss"], label="Training loss")
+    axes[0].plot(history.history["val_loss"], label="Validation loss")
+    axes[0].set_title("MLP Binary Cross-Entropy Loss")
+    axes[0].set_xlabel("Epoch")
+    axes[0].set_ylabel("Loss")
+    axes[0].legend()
+
+    axes[1].plot(history.history["pr_auc"], label="Training PR-AUC")
+    axes[1].plot(history.history["val_pr_auc"], label="Validation PR-AUC")
+    axes[1].set_title("MLP PR-AUC During Training")
+    axes[1].set_xlabel("Epoch")
+    axes[1].set_ylabel("PR-AUC")
+    axes[1].legend()
+
+    fig.tight_layout()
+    output_path = figures_dir / "mlp_selected_model_training_curve.png"
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return output_path
@@ -326,6 +541,69 @@ def run_supervised_pipeline(processed_data_path, results_dir):
     return test_df
 
 
+def run_mlp_pipeline(processed_data_path, results_dir, figures_dir):
+    """Train MLP candidates, tune thresholds on validation data, and test once."""
+    processed_data_path = Path(processed_data_path)
+    results_dir = Path(results_dir)
+    figures_dir = Path(figures_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    data = joblib.load(processed_data_path)
+    trained_models, histories, validation_df, class_weight = train_mlp_experiments(
+        data["X_train"],
+        data["y_train"],
+        data["X_val"],
+        data["y_val"],
+    )
+
+    best_row = select_best_result(validation_df)
+    best_name = best_row["Model"]
+    best_threshold = float(best_row["Threshold"])
+    best_model = trained_models[best_name]
+    best_history = histories[best_name]
+    best_config = next(
+        config for config in DEFAULT_MLP_CONFIGS if config["name"] == best_name
+    )
+
+    test_scores = mlp_positive_scores(best_model, data["X_test"])
+    test_df = pd.DataFrame(
+        [
+            evaluate_binary_scores(
+                best_name,
+                data["y_test"],
+                test_scores,
+                best_threshold,
+            )
+        ]
+    )
+
+    validation_df.to_csv(
+        results_dir / "mlp_validation_threshold_tuning.csv",
+        index=False,
+    )
+    test_df.to_csv(results_dir / "mlp_test_results.csv", index=False)
+    best_model.save(results_dir / "mlp_best_model.keras")
+    training_curve_path = save_mlp_training_curve(best_history, figures_dir)
+
+    joblib.dump(
+        {
+            "best_mlp_name": best_name,
+            "best_mlp_threshold": best_threshold,
+            "best_mlp_config": dict(best_config),
+            "best_mlp_validation_row": best_row.to_dict(),
+            "class_weight": class_weight,
+            "training_curve_path": str(training_curve_path),
+        },
+        results_dir / "mlp_selection.pkl",
+    )
+
+    print("MLP pipeline complete.")
+    print("Saved training curve:", training_curve_path)
+    print(test_df.to_string(index=False))
+    return test_df
+
+
 def run_autoencoder_pipeline(processed_data_path, results_dir, figures_dir):
     """Train autoencoder experiments, tune thresholds on validation data, and test once."""
     processed_data_path = Path(processed_data_path)
@@ -341,6 +619,12 @@ def run_autoencoder_pipeline(processed_data_path, results_dir, figures_dir):
         X_train_normal,
         data["X_val"],
         data["y_val"],
+    )
+    _, _, learning_rate_validation_df = train_autoencoder_experiments(
+        X_train_normal,
+        data["X_val"],
+        data["y_val"],
+        configs=DEFAULT_AUTOENCODER_LR_SWEEP_CONFIGS,
     )
 
     best_row = select_best_result(validation_df)
@@ -372,6 +656,20 @@ def run_autoencoder_pipeline(processed_data_path, results_dir, figures_dir):
         best_name,
         figures_dir,
     )
+    learning_rate_figure_path, learning_rate_summary_df = (
+        save_autoencoder_learning_rate_comparison(
+            learning_rate_validation_df,
+            figures_dir,
+        )
+    )
+    learning_rate_validation_df.to_csv(
+        results_dir / "autoencoder_learning_rate_sweep_validation.csv",
+        index=False,
+    )
+    learning_rate_summary_df.to_csv(
+        results_dir / "autoencoder_learning_rate_sweep_best_validation.csv",
+        index=False,
+    )
 
     joblib.dump(
         {
@@ -379,12 +677,14 @@ def run_autoencoder_pipeline(processed_data_path, results_dir, figures_dir):
             "best_autoencoder_threshold": best_threshold,
             "best_autoencoder_validation_row": best_row.to_dict(),
             "training_curve_path": str(training_curve_path),
+            "learning_rate_sweep_figure_path": str(learning_rate_figure_path),
         },
         results_dir / "autoencoder_selection.pkl",
     )
 
     print("Autoencoder pipeline complete.")
     print("Saved training curve:", training_curve_path)
+    print("Saved learning-rate comparison:", learning_rate_figure_path)
     print(test_df.to_string(index=False))
     return test_df
 
@@ -396,7 +696,7 @@ def main():
         "mode",
         nargs="?",
         default="supervised",
-        choices=["supervised", "autoencoder", "all"],
+        choices=["supervised", "mlp", "autoencoder", "all"],
         help="Which model pipeline to run.",
     )
     parser.add_argument(
@@ -409,6 +709,9 @@ def main():
 
     if args.mode in {"supervised", "all"}:
         run_supervised_pipeline(args.data_path, args.results_dir)
+
+    if args.mode in {"mlp", "all"}:
+        run_mlp_pipeline(args.data_path, args.results_dir, args.figures_dir)
 
     if args.mode in {"autoencoder", "all"}:
         run_autoencoder_pipeline(args.data_path, args.results_dir, args.figures_dir)

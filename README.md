@@ -25,13 +25,13 @@ The raw dataset is not committed to this repository. See `info.md` for download 
 
 ## What We Created vs External Sources
 
-The dataset comes from the public Kaggle/ULB credit card fraud dataset. The modelling workflow, preprocessing decisions, validation/test split, threshold tuning, model comparison, autoencoder experiments, evaluation analysis, and project code were created for this ACML project.
+The dataset comes from the public Kaggle/ULB credit card fraud dataset. The modelling workflow, preprocessing decisions, validation/test split, threshold tuning, model comparison, supervised MLP experiments, autoencoder experiments, evaluation analysis, and project code were created for this project.
 
 External Python libraries such as pandas, scikit-learn, matplotlib, joblib, and TensorFlow/Keras are used for data handling, modelling, plotting, saving artifacts, and neural-network implementation.
 
 ## Dependencies
 
-Use the same Python environment that was used to run the corrected notebooks. If imports fail, install the pinned dependencies:
+Use one Python environment for preprocessing, training, and evaluation so saved scikit-learn artifacts are loaded with the same dependency versions that created them. If imports fail, install the pinned dependencies:
 
 ```bash
 source .venv/Scripts/activate
@@ -56,9 +56,9 @@ Git Bash alternative:
 ./.venv/Scripts/python.exe src/preprocessing.py
 ```
 
-### 2. Train and Evaluate Supervised Models
+### 2. Train and Evaluate Classical Supervised Models
 
-This trains the corrected supervised candidates, selects the best model and threshold on validation data, then evaluates once on the test set. It can take several minutes because it trains Random Forest and Gradient Boosting candidates.
+This trains the corrected classical supervised candidates, selects the best model and threshold on validation data, then evaluates once on the test set. It can take several minutes because it trains Random Forest and Gradient Boosting candidates.
 
 ```powershell
 python src/models.py supervised
@@ -70,9 +70,23 @@ Git Bash alternative:
 ./.venv/Scripts/python.exe src/models.py supervised
 ```
 
-### 3. Train and Evaluate Autoencoders
+### 3. Train and Evaluate the MLP Classifier
 
-This trains the autoencoder experiments, selects the best architecture and threshold on validation data, then evaluates once on the test set. It also saves the selected autoencoder training curve to `outputs/figures`.
+This trains the supervised Dense Neural Network experiments, selects the best MLP configuration and threshold on validation data, then evaluates once on the test set. It also saves the selected MLP training curve to `outputs/figures`.
+
+```powershell
+python src/models.py mlp
+```
+
+Git Bash alternative:
+
+```bash
+./.venv/Scripts/python.exe src/models.py mlp
+```
+
+### 4. Train and Evaluate Autoencoders
+
+This trains the autoencoder experiments, selects the best architecture and threshold on validation data, then evaluates once on the test set. It also saves the selected autoencoder training curve and a fixed-architecture learning-rate sweep comparison to `outputs/figures`.
 
 ```powershell
 python src/models.py autoencoder
@@ -84,13 +98,13 @@ Git Bash alternative:
 ./.venv/Scripts/python.exe src/models.py autoencoder
 ```
 
-To run both model pipelines in sequence:
+To run the supervised baselines, MLP classifier, and autoencoder pipelines in sequence:
 
 ```powershell
 python src/models.py all
 ```
 
-### 4. Show Final Saved Results and Regenerate Figures
+### 5. Show Final Saved Results and Regenerate Figures
 
 This prints the saved final test results and regenerates the final plots in `outputs/figures`.
 
@@ -139,8 +153,20 @@ The source workflow saves both preprocessing and model-evaluation figures in `ou
 - `supervised_selected_model_confusion_matrix.png`  
   Shows final test predictions for the selected Random Forest. It has very few false positives while still detecting most fraud cases.
 
+- `mlp_selected_model_training_curve.png`
+  Shows MLP training and validation loss and PR-AUC across epochs. The validation PR-AUC curve documents neural-network learning on the imbalanced classification task.
+
+- `mlp_selected_model_roc_pr_curves.png`
+  Shows ROC and precision-recall curves for the selected Dense Neural Network. Its ROC-AUC is strong, while the PR curve is the more informative view of fraud-detection quality.
+
+- `mlp_selected_model_confusion_matrix.png`
+  Shows final MLP test predictions. The MLP detects more fraud cases than the selected Random Forest at the chosen threshold, with a small increase in false positives.
+
 - `ae_bottleneck_6_dropout_0_2_training_curve.png`  
   Shows autoencoder training and validation loss over epochs. This documents neural-network training behaviour and checks that training converged.
+
+- `autoencoder_learning_rate_sweep_validation.png`
+  Compares validation F1 and PR-AUC for the bottleneck-6/dropout-0.2 autoencoder at three Adam learning rates. The sweep shows that optimiser settings change reconstruction-score quality even with the architecture held fixed.
 
 - `ae_bottleneck_6_dropout_0_2_reconstruction_errors.png`  
   Shows reconstruction-error distributions for normal and fraud transactions. The threshold separates some fraud cases, but there is still overlap between classes.
@@ -152,14 +178,15 @@ The source workflow saves both preprocessing and model-evaluation figures in `ou
   Shows final test predictions for the selected autoencoder. It catches slightly more fraud cases than Random Forest, but creates many more false positives.
 
 - `model_final_metric_comparison.png`  
-  Compares Precision, Recall, F1, ROC-AUC, and PR-AUC for the final models. Random Forest is the best practical model because it has much better precision, F1, and PR-AUC.
+  Compares Precision, Recall, F1, ROC-AUC, and PR-AUC for the final Random Forest, MLP, and autoencoder models. The Random Forest leads on F1 and PR-AUC, while the MLP gives a stronger recall trade-off than the autoencoder.
 
 - `model_final_detection_count_comparison.png`  
-  Compares false positives, false negatives, and true positives. This makes the trade-off clear: the autoencoder gains a few true positives but at a large false-positive cost.
+  Compares false positives, false negatives, and true positives. This makes the operating trade-offs visible: the MLP gains fraud detections with a modest false-positive increase, while the autoencoder reaches similar recall with many more false positives.
 
 ## Recommended Run Order
 
 1. `python src/preprocessing.py`
 2. `python src/models.py supervised`
-3. `python src/models.py autoencoder`
-4. `python src/evaluation.py`
+3. `python src/models.py mlp`
+4. `python src/models.py autoencoder`
+5. `python src/evaluation.py`

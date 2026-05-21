@@ -137,10 +137,13 @@ def load_final_results(results_dir):
     frames = []
 
     baseline_path = results_dir / "baseline_test_results.csv"
+    mlp_path = results_dir / "mlp_test_results.csv"
     autoencoder_path = results_dir / "autoencoder_test_results.csv"
 
     if baseline_path.exists():
         frames.append(pd.read_csv(baseline_path))
+    if mlp_path.exists():
+        frames.append(pd.read_csv(mlp_path))
     if autoencoder_path.exists():
         frames.append(pd.read_csv(autoencoder_path))
 
@@ -162,6 +165,17 @@ def _safe_filename(name):
         .replace(".", "_")
         .replace("/", "_")
     )
+
+
+def _final_model_labels(results_df):
+    """Return compact labels for final-model comparison figures."""
+    labels = results_df["Model"].replace(
+        {
+            "Random Forest - balanced": "Random Forest",
+            "AE_bottleneck_6_dropout_0.2": "Autoencoder",
+        }
+    )
+    return labels.map(lambda label: "MLP" if str(label).startswith("MLP_") else label)
 
 
 def save_roc_pr_curves(y_true, y_score, model_name, figure_dir, filename_prefix):
@@ -256,12 +270,7 @@ def save_metric_comparison_plot(results_df, figure_dir):
 
     metrics = ["Precision", "Recall", "F1", "ROC_AUC", "PR_AUC"]
     available_metrics = [metric for metric in metrics if metric in results_df.columns]
-    model_labels = results_df["Model"].replace(
-        {
-            "Random Forest - balanced": "Random Forest",
-            "AE_bottleneck_6_dropout_0.2": "Autoencoder",
-        }
-    )
+    model_labels = _final_model_labels(results_df)
 
     x = np.arange(len(available_metrics))
     width = 0.35 if len(results_df) <= 2 else 0.8 / len(results_df)
@@ -303,12 +312,7 @@ def save_error_count_comparison_plot(results_df, figure_dir):
 
     counts = ["FP", "FN", "TP"]
     available_counts = [count for count in counts if count in results_df.columns]
-    model_labels = results_df["Model"].replace(
-        {
-            "Random Forest - balanced": "Random Forest",
-            "AE_bottleneck_6_dropout_0.2": "Autoencoder",
-        }
-    )
+    model_labels = _final_model_labels(results_df)
 
     x = np.arange(len(available_counts))
     width = 0.35 if len(results_df) <= 2 else 0.8 / len(results_df)
@@ -453,6 +457,37 @@ def save_final_result_plots(
                 best_name,
                 figures_dir,
                 "supervised_selected_model",
+            )
+        )
+
+    mlp_model_path = results_dir / "mlp_best_model.keras"
+    mlp_selection_path = results_dir / "mlp_selection.pkl"
+    if mlp_model_path.exists() and mlp_selection_path.exists():
+        from tensorflow.keras.models import load_model
+
+        selection = joblib.load(mlp_selection_path)
+        best_name = selection["best_mlp_name"]
+        best_threshold = float(selection["best_mlp_threshold"])
+        mlp_model = load_model(mlp_model_path)
+        test_scores = mlp_model.predict(data["X_test"], verbose=0).reshape(-1)
+
+        saved_paths.append(
+            save_roc_pr_curves(
+                data["y_test"],
+                test_scores,
+                best_name,
+                figures_dir,
+                "mlp_selected_model",
+            )
+        )
+        saved_paths.append(
+            save_confusion_matrix_plot(
+                data["y_test"],
+                test_scores,
+                best_threshold,
+                best_name,
+                figures_dir,
+                "mlp_selected_model",
             )
         )
 
